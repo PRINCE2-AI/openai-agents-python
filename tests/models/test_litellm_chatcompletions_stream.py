@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+import litellm
 import pytest
 from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk,
@@ -27,12 +28,13 @@ from openai.types.responses import (
     ResponseRefusalDeltaEvent,
 )
 
+from agents import function_tool
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.extensions.models.litellm_provider import LitellmProvider
 from agents.items import TResponseStreamEvent
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelTracing
-from agents.tracing import get_current_span, trace
+from agents.tracing import generation_span, get_current_span, trace
 
 
 @pytest.mark.allow_call_model_methods
@@ -1092,3 +1094,57 @@ async def test_stream_response_lets_in_flight_close_finish_after_cancellation(
     finally:
         release.set()
         task.cancel()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["web_search", "mcp"])
+async def test_fetch_response_reports_function_tool_choice_for_hosted_like_names(
+    monkeypatch, tool_name: str
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _empty_async_stream()
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    @function_tool
+    def web_search(query: str) -> str:
+        """Search the app's own index."""
+        return query
+
+    @function_tool
+    def mcp(query: str) -> str:
+        """Call the app's own MCP bridge."""
+        return query
+
+    tools = {"web_search": web_search, "mcp": mcp}
+    model = LitellmProvider().get_model("gpt-4o-mini")
+    with generation_span(disabled=True) as span:
+        placeholder, _stream = await model._fetch_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(tool_choice=tool_name),
+            tools=[tools[tool_name]],
+            output_schema=None,
+            handoffs=[],
+            span=span,
+            tracing=ModelTracing.DISABLED,
+            stream=True,
+        )
+
+    assert captured["tool_choice"] == {"type": "function", "function": {"name": tool_name}}
+    assert placeholder.tool_choice.model_dump() == {"type": "function", "name": tool_name}
+
+
+async def _empty_async_stream() -> AsyncIterator[ChatCompletionChunk]:
+    if False:
+        yield ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta())],
+        )

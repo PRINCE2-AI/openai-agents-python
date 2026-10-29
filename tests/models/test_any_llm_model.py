@@ -1148,6 +1148,66 @@ async def test_any_llm_stream_uses_chat_handler_when_responses_are_unsupported(m
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["web_search", "mcp"])
+async def test_any_llm_stream_reports_function_tool_choice_for_hosted_like_names(
+    monkeypatch, tool_name: str
+) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_empty_chat_stream())
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    AnyLLMModel = module.AnyLLMModel
+
+    placeholders: list[Any] = []
+
+    async def fake_handle_stream(response, stream, model=None):
+        placeholders.append(response)
+        async for _chunk in stream:
+            pass
+        yield ResponseCompletedEvent(
+            type="response.completed",
+            response=_response("done"),
+            sequence_number=1,
+        )
+
+    monkeypatch.setattr(module.ChatCmplStreamHandler, "handle_stream", fake_handle_stream)
+
+    @function_tool
+    def web_search(query: str) -> str:
+        """Search the app's own index."""
+        return query
+
+    @function_tool
+    def mcp(query: str) -> str:
+        """Call the app's own MCP bridge."""
+        return query
+
+    tools = {"web_search": web_search, "mcp": mcp}
+    model = AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    events = [
+        event
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(tool_choice=tool_name),
+            tools=[tools[tool_name]],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+    ]
+
+    assert [event.type for event in events] == ["response.completed"]
+    assert provider.chat_calls[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": tool_name},
+    }
+    assert placeholders[0].tool_choice.model_dump() == {"type": "function", "name": tool_name}
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_any_llm_stream_passthrough_uses_responses_when_supported(monkeypatch) -> None:
     async def response_stream() -> AsyncIterator[ResponseCompletedEvent]:
         yield ResponseCompletedEvent(

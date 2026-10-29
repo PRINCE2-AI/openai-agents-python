@@ -43,6 +43,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ToolChoiceFunction,
 )
 from openai.types.responses.response_input_item_param import FunctionCallOutput
 
@@ -566,6 +567,22 @@ def test_convert_tool_choice_allows_tool_search_as_named_function_for_chat_model
     assert isinstance(tool_choice_dict, dict)
     assert tool_choice_dict["type"] == "function"
     assert tool_choice_dict["function"]["name"] == "tool_search"
+
+
+def test_convert_tool_choice_for_response_mirrors_the_chat_completions_meaning() -> None:
+    """The placeholder response must select the same function the request selected.
+
+    Chat Completions models have no hosted tools, so names that also exist as Responses
+    builtins ("web_search", "mcp") are function names here.
+    """
+    assert Converter.convert_tool_choice_for_response(None) == "auto"
+    assert Converter.convert_tool_choice_for_response("auto") == "auto"
+    assert Converter.convert_tool_choice_for_response("required") == "required"
+    assert Converter.convert_tool_choice_for_response("none") == "none"
+    for name in ("web_search", "mcp", "file_search", "code_interpreter", "mytool"):
+        tool_choice = Converter.convert_tool_choice_for_response(name)
+        assert isinstance(tool_choice, ToolChoiceFunction)
+        assert tool_choice.model_dump() == {"type": "function", "name": name}
 
 
 def test_convert_response_format_returns_not_given_for_plain_text_and_dict_for_schemas() -> None:
